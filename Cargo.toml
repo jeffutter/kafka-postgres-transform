@@ -3,6 +3,10 @@ name = "kafka-postgres-transform"
 version = "0.1.0"
 edition = "2024"
 
+[dev-dependencies]
+tempfile = "3.8"
+prost = "0.12"
+
 [dependencies]
 rdkafka = { version = "0.34", features = ["ssl", "cmake-build"] }
 schema_registry_converter = { version = "4.0.0", features = ["proto_raw"] }

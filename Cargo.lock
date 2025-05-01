@@ -1430,6 +1430,7 @@ dependencies = [
  "schema_registry_converter",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

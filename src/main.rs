@@ -3,13 +3,12 @@ use clap::Parser;
 use std::path::PathBuf;
 use tracing::info;
 
-mod kafka;
-mod protobuf;
-mod wasm;
-mod postgres;
-mod config;
+// Use the modules from lib.rs instead of defining them here
+use kafka_postgres_transform::{
+    config::AppConfig,
+    kafka, postgres, wasm,
+};
 
-use config::AppConfig;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
