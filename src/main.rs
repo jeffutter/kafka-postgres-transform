@@ -6,14 +6,14 @@ use tracing::info;
 // Use the modules from lib.rs instead of defining them here
 use kafka_postgres_transform::{
     config::AppConfig,
-    kafka, postgres, wasm,
+    deno, kafka, postgres,
 };
 
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the WASM plugin
+    /// Path to the JavaScript plugin
     #[arg(short, long)]
     plugin: PathBuf,
 
@@ -55,9 +55,9 @@ async fn main() -> Result<()> {
         group_id: args.group_id,
     };
     
-    // Initialize WASM plugin
-    let plugin = wasm::init_plugin(&args.plugin)
-        .context("Failed to initialize WASM plugin")?;
+    // Initialize JavaScript plugin
+    let plugin = deno::init_plugin(&args.plugin)
+        .context("Failed to initialize JavaScript plugin")?;
     
     // Initialize PostgreSQL connection
     let pg_client = postgres::init_client(&config.postgres_url)
