@@ -4,3 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rdkafka = { version = "0.34", features = ["ssl", "cmake-build"] }
+schema_registry_converter = { version = "4.0.0", features = ["proto_raw"] }
+prost = "0.12"
+prost-reflect = "0.12"
+extism = "1.0.0"
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+base64 = "0.21"
