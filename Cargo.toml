@@ -12,7 +12,7 @@ rdkafka = { version = "0.34", features = ["ssl", "cmake-build"] }
 schema_registry_converter = { version = "4.0.0", features = ["proto_raw"] }
 prost = "0.12"
 prost-reflect = "0.12"
-extism = "1.0.0"
+deno_core = "0.240.0"
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"

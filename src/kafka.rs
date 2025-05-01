@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::protobuf;
-use crate::wasm::WasmPlugin;
+use crate::deno::DenoPlugin;
 use anyhow::{Context, Result};
 use postgres::Client;
 use rdkafka::client::ClientContext;
@@ -37,7 +37,7 @@ type LoggingConsumer = StreamConsumer<CustomContext>;
 
 pub async fn consume_messages(
     config: AppConfig,
-    mut plugin: WasmPlugin,
+    mut plugin: DenoPlugin,
     mut pg_client: Client,
 ) -> Result<()> {
     // Create Schema Registry client
@@ -106,7 +106,7 @@ pub async fn consume_messages(
 async fn process_message(
     payload: &[u8],
     sr_settings: &SrSettings,
-    plugin: &mut WasmPlugin,
+    plugin: &mut DenoPlugin,
     pg_client: &mut Client,
     topic: &str,
 ) -> Result<()> {
@@ -118,9 +118,9 @@ async fn process_message(
         .await
         .context("Failed to decode Protobuf message")?;
 
-    // Transform the message using the WASM plugin
-    let transformed = crate::wasm::transform_message(plugin, &decoded)
-        .context("Failed to transform message with WASM plugin")?;
+    // Transform the message using the JavaScript plugin
+    let transformed = crate::deno::transform_message(plugin, &decoded)
+        .context("Failed to transform message with JavaScript plugin")?;
 
     // Insert into PostgreSQL
     crate::postgres::insert_data(pg_client, &transformed)

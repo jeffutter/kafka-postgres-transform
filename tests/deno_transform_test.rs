@@ -1,23 +1,21 @@
 use anyhow::Result;
-use kafka_postgres_transform::wasm::{init_plugin, transform_message};
+use kafka_postgres_transform::deno::{init_plugin, transform_message};
 use serde_json::json;
-use std::fs;
 use std::path::Path;
-use tempfile::tempdir;
 
-// Path to the compiled WASM plugin
-const WASM_PLUGIN_PATH: &str = "target/wasm32-unknown-unknown/release/test_transform_plugin.wasm";
+// Path to the JavaScript plugin
+const JS_PLUGIN_PATH: &str = "js-plugin/transform.js";
 
 #[test]
-fn test_wasm_transform() -> Result<()> {
-    // Skip the test if the WASM plugin doesn't exist
-    let wasm_path = Path::new(WASM_PLUGIN_PATH);
-    if !wasm_path.exists() {
-        println!("Skipping test_wasm_transform: WASM plugin not found at {}", WASM_PLUGIN_PATH);
+fn test_deno_transform() -> Result<()> {
+    // Skip the test if the JavaScript plugin doesn't exist
+    let js_path = Path::new(JS_PLUGIN_PATH);
+    if !js_path.exists() {
+        println!("Skipping test_deno_transform: JavaScript plugin not found at {}", JS_PLUGIN_PATH);
         return Ok(());
     }
     
-    // Create a sample protobuf message as JSON
+    // Create a sample message as JSON
     let sample_message = json!({
         "id": 1234,
         "name": "Test Message",
@@ -27,8 +25,8 @@ fn test_wasm_transform() -> Result<()> {
         }
     });
     
-    // Initialize the WASM plugin
-    let mut plugin = init_plugin(wasm_path)?;
+    // Initialize the JavaScript plugin
+    let mut plugin = init_plugin(js_path)?;
     
     // Transform the message
     let result = transform_message(&mut plugin, &sample_message);
@@ -46,13 +44,13 @@ fn test_wasm_transform() -> Result<()> {
     Ok(())
 }
 
-// Mock test that doesn't require a real WASM plugin
+// Test with customer and order data
 #[test]
-fn test_transform_with_mock() -> Result<()> {
-    // Skip the test if the WASM plugin doesn't exist
-    let wasm_path = Path::new(WASM_PLUGIN_PATH);
-    if !wasm_path.exists() {
-        println!("Skipping test_transform_with_mock: WASM plugin not found at {}", WASM_PLUGIN_PATH);
+fn test_transform_with_order() -> Result<()> {
+    // Skip the test if the JavaScript plugin doesn't exist
+    let js_path = Path::new(JS_PLUGIN_PATH);
+    if !js_path.exists() {
+        println!("Skipping test_transform_with_order: JavaScript plugin not found at {}", JS_PLUGIN_PATH);
         return Ok(());
     }
     
@@ -87,8 +85,8 @@ fn test_transform_with_mock() -> Result<()> {
         }
     });
     
-    // Initialize the WASM plugin
-    let mut plugin = init_plugin(wasm_path)?;
+    // Initialize the JavaScript plugin
+    let mut plugin = init_plugin(js_path)?;
     
     // Transform the input
     let result = transform_message(&mut plugin, &input)?;
