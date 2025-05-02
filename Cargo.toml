@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dev-dependencies]
-prost = "0.12"
+prost = "0.13"
 
 [dependencies]
 rdkafka = { version = "0.34", features = ["ssl", "cmake-build"] }
 schema_registry_converter = { version = "4.0.0", features = ["proto_raw"] }
-prost = "0.12"
+prost = "0.13"
 prost-reflect = "0.12"
 prost-types = "0.12"
 deno_core = "0.240.0"
