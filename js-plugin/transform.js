@@ -7,6 +7,25 @@
  */
 function transform(input) {
   try {
+    // Handle customer data directly
+    if (input.id && input.name) {
+      console.log(`Processing customer ${input.name}`);
+      
+      return {
+        success: true,
+        data: {
+          table_info: {
+            name: "customers",
+            schema: "public"
+          },
+          data: {
+            customer_id: input.id,
+            customer_name: input.name
+          }
+        }
+      };
+    }
+    
     // Extract customer and order data if present
     if (input.customer && input.order) {
       // Extract customer data

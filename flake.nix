@@ -34,6 +34,7 @@
           { }
           // (lib.attrsets.optionalAttrs pkgs.stdenv.isLinux {
             RUSTFLAGS = "-Clinker=clang -Clink-arg=--ld-path=${pkgs.mold}/bin/mold";
+            LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.openssl ];
           });
 
         commonArgs = (
@@ -74,15 +75,6 @@
           {
             packages = [
               rust-bin.stable.latest.default
-              (rust-bin.stable.latest.default.override {
-                extensions = [
-                  "rust-src"
-                  "rust-analyzer"
-                  "rustfmt"
-                  "clippy"
-                ];
-                targets = [ "wasm32-unknown-unknown" ];
-              })
               cargo
               cargo-watch
               rust-analyzer
