@@ -7,7 +7,7 @@ edition = "2024"
 prost = "0.12"
 
 [dependencies]
-rdkafka = { version = "0.34", features = ["ssl", "cmake-build"] }
+rdkafka = { version = "0.37", features = ["ssl", "cmake-build"] }
 schema_registry_converter = { version = "4.0.0", features = ["proto_raw"] }
 prost = "0.12"
 prost-reflect = "0.12"
