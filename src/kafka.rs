@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
-use crate::protobuf;
 use crate::deno::DenoPlugin;
+use crate::protobuf;
 use anyhow::{Context, Result};
 use postgres::Client;
 use rdkafka::client::ClientContext;

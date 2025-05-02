@@ -1,20 +1,53 @@
 use anyhow::{Context, Result};
-use prost_reflect::{DynamicMessage, MessageDescriptor, ReflectMessage};
+use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, ReflectMessage};
 use schema_registry_converter::async_impl::schema_registry::SrSettings;
 use schema_registry_converter::async_impl::schema_registry::get_schema_by_subject;
 use schema_registry_converter::schema_registry_common::SubjectNameStrategy;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::Write;
+use std::process::Command;
+use tempfile::NamedTempFile;
+use tracing::info;
 
-// Helper function to convert proto schema to file descriptor set
-fn proto_schema_to_file_descriptor_set(_schema: &str) -> Result<Vec<u8>> {
-    // This is a simplified implementation
-    // In a real application, you would need to parse the proto schema
-    // and generate a file descriptor set
+// Convert proto schema string to file descriptor set bytes
+fn proto_schema_to_file_descriptor_set(schema: &str) -> Result<Vec<u8>> {
+    info!("Converting proto schema to file descriptor set");
 
-    // For now, we'll just return a placeholder
-    // This would need to be replaced with actual implementation
-    anyhow::bail!("proto_schema_to_file_descriptor_set not implemented")
+    // Create a temporary file to store the schema
+    let mut proto_file = NamedTempFile::new()?;
+    proto_file.write_all(schema.as_bytes())?;
+    let proto_path = proto_file.path();
+
+    // Create a temporary file for the output descriptor set
+    let descriptor_file = NamedTempFile::new()?;
+    let descriptor_path = descriptor_file.path();
+
+    // Run protoc to compile the schema to a file descriptor set
+    let output = Command::new("protoc")
+        .arg(format!(
+            "--proto_path={}",
+            proto_path.parent().unwrap().display()
+        ))
+        .arg(format!(
+            "--descriptor_set_out={}",
+            descriptor_path.display()
+        ))
+        .arg("--include_imports")
+        .arg(proto_path)
+        .output()
+        .context("Failed to execute protoc. Make sure it's installed and in your PATH")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("protoc failed: {}", stderr);
+    }
+
+    // Read the generated file descriptor set
+    let descriptor_bytes =
+        std::fs::read(descriptor_path).context("Failed to read generated file descriptor set")?;
+
+    Ok(descriptor_bytes)
 }
 
 pub async fn decode_message(
@@ -39,10 +72,9 @@ pub async fn decode_message(
     let pool = prost_reflect::DescriptorPool::from_file_descriptor_set(file_descriptor_set)?;
 
     // Assuming the message type is specified in the schema
-    // This is a simplification - in practice, you'd need to extract the message type from the schema
     let message_type = extract_message_type_from_schema(schema)?;
     let descriptor = pool
-        .get_message_by_name(message_type)
+        .get_message_by_name(&message_type)
         .context("Failed to get message descriptor")?;
 
     // Decode the message
@@ -54,14 +86,62 @@ pub async fn decode_message(
     Ok(json_value)
 }
 
-fn extract_message_type_from_schema(_schema: &str) -> Result<&str> {
-    // This is a placeholder - in a real implementation, you would parse the schema
-    // to extract the fully qualified message type name
-    // For example, "com.example.MyMessage"
+fn extract_message_type_from_schema(schema: &str) -> Result<String> {
+    info!("Extracting message type from schema");
 
-    // For simplicity, we'll just return a hardcoded value
-    // In practice, you'd need to parse the Protobuf schema text
-    Ok("com.example.MyMessage")
+    // Create a temporary file to store the schema
+    let mut proto_file = NamedTempFile::new()?;
+    proto_file.write_all(schema.as_bytes())?;
+    let proto_path = proto_file.path();
+
+    // Create a temporary file for the output descriptor set
+    let descriptor_file = NamedTempFile::new()?;
+    let descriptor_path = descriptor_file.path();
+
+    // Run protoc to compile the schema to a file descriptor set
+    let output = Command::new("protoc")
+        .arg(format!(
+            "--proto_path={}",
+            proto_path.parent().unwrap().display()
+        ))
+        .arg(format!(
+            "--descriptor_set_out={}",
+            descriptor_path.display()
+        ))
+        .arg("--include_imports")
+        .arg(proto_path)
+        .output()
+        .context("Failed to execute protoc")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("protoc failed: {}", stderr);
+    }
+
+    // Read the generated file descriptor set
+    let descriptor_bytes = std::fs::read(descriptor_path)?;
+
+    // Parse the file descriptor set
+    let file_descriptor_set = prost::Message::decode(descriptor_bytes.as_slice())?;
+    let pool = DescriptorPool::from_file_descriptor_set(file_descriptor_set)?;
+
+    // Find the first message type in the pool
+    // In a real application, you might want to be more specific about which message to use
+    let file_descriptors = pool.files();
+    let mut message_types = Vec::new();
+
+    for file in file_descriptors {
+        for message in file.messages() {
+            message_types.push(message);
+        }
+    }
+
+    if message_types.is_empty() {
+        anyhow::bail!("No message types found in schema");
+    }
+
+    // Return the fully qualified name of the first message
+    Ok(message_types[0].full_name().to_string())
 }
 
 fn decode_dynamic_message(
@@ -80,7 +160,7 @@ fn decode_dynamic_message(
     Ok(dynamic_message)
 }
 
-fn dynamic_message_to_json(message: &DynamicMessage) -> Result<Value> {
+pub fn dynamic_message_to_json(message: &DynamicMessage) -> Result<Value> {
     // Convert the dynamic message to a HashMap
     let mut map = HashMap::new();
 
