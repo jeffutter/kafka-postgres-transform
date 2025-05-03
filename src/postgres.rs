@@ -1,16 +1,24 @@
 use anyhow::{Context, Result};
-use postgres::{Client, NoTls};
 use serde_json::Value;
+use tokio_postgres::{Client, NoTls};
 use tracing::info;
 
-pub fn init_client(postgres_url: &str) -> Result<Client> {
+pub async fn init_client(postgres_url: &str) -> Result<Client> {
     info!("Connecting to PostgreSQL at: {}", postgres_url);
-    let client = Client::connect(postgres_url, NoTls).context("Failed to connect to PostgreSQL")?;
+    let (client, connection) = tokio_postgres::connect(postgres_url, NoTls)
+        .await
+        .context("Failed to connect to PostgreSQL")?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
 
     Ok(client)
 }
 
-pub fn insert_data(client: &mut Client, data: &Value) -> Result<()> {
+pub async fn insert_data(client: &mut Client, data: &Value) -> Result<()> {
     // Extract table information from the transformed data
     let table_info = data
         .get("table_info")
@@ -24,7 +32,7 @@ pub fn insert_data(client: &mut Client, data: &Value) -> Result<()> {
     let columns = table_info
         .get("columns")
         .and_then(|v| v.as_array())
-        .context("Missing columns in table_info")?;
+        .context(format!("Missing columns in table_info: {:?}", data))?;
 
     // Extract row data
     let row_data = data
@@ -49,7 +57,7 @@ pub fn insert_data(client: &mut Client, data: &Value) -> Result<()> {
     );
 
     // Extract values for the query
-    let mut values: Vec<Box<dyn postgres::types::ToSql + Sync>> = Vec::new();
+    let mut values: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> = Vec::new();
 
     for col in columns {
         let col_name = col
@@ -106,12 +114,13 @@ pub fn insert_data(client: &mut Client, data: &Value) -> Result<()> {
     }
 
     // Convert values to a slice of ToSql trait objects
-    let params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
         values.iter().map(|v| v.as_ref()).collect();
 
     // Execute the query
     client
         .execute(&query, &params[..])
+        .await
         .context("Failed to execute INSERT query")?;
 
     info!("Successfully inserted data into table: {}", table_name);

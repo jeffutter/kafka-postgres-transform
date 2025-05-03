@@ -2,7 +2,6 @@ use crate::config::AppConfig;
 use crate::deno::DenoPlugin;
 use crate::protobuf;
 use anyhow::{Context, Result};
-use postgres::Client;
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, ConsumerContext, Rebalance, StreamConsumer};
@@ -10,6 +9,7 @@ use rdkafka::error::KafkaResult;
 use rdkafka::message::Message;
 use schema_registry_converter::async_impl::schema_registry::SrSettings;
 use schema_registry_converter::schema_registry_common::SubjectNameStrategy;
+use tokio_postgres::Client;
 use tracing::{error, info, warn};
 
 struct CustomContext;
@@ -124,6 +124,7 @@ async fn process_message(
 
     // Insert into PostgreSQL
     crate::postgres::insert_data(pg_client, &transformed)
+        .await
         .context("Failed to insert data into PostgreSQL")?;
 
     Ok(())

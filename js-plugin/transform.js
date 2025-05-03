@@ -7,16 +7,20 @@
  */
 function transform(input) {
   try {
+    // console.log(`Processing customer '${input.name}'`);
     // Handle customer data directly
     if (input.id && input.name) {
-      console.log(`Processing customer ${input.name}`);
-      
+
       return {
         success: true,
         data: {
           table_info: {
             name: "customers",
-            schema: "public"
+            schema: "public",
+            columns: [
+              { name: "customer_id", type: "string" },
+              { name: "customer_name", type: "string" }
+            ]
           },
           data: {
             customer_id: input.id,
@@ -25,67 +29,74 @@ function transform(input) {
         }
       };
     }
-    
+
     // Extract customer and order data if present
     if (input.customer && input.order) {
       // Extract customer data
       const customerId = input.customer.id;
       const customerName = input.customer.name;
-      
+
       if (customerId === undefined) {
         return {
           success: false,
           error: "Missing customer id"
         };
       }
-      
+
       if (customerName === undefined) {
         return {
           success: false,
           error: "Missing customer name"
         };
       }
-      
+
       // Extract order data
       const orderId = input.order.id;
       const items = input.order.items;
-      
+
       if (orderId === undefined) {
         return {
           success: false,
           error: "Missing order id"
         };
       }
-      
+
       if (!Array.isArray(items)) {
         return {
           success: false,
           error: "Missing order items"
         };
       }
-      
+
       // Calculate totals
       let totalItems = 0;
       let totalPrice = 0.0;
-      
+
       for (const item of items) {
         const quantity = item.quantity || 0;
         const price = item.price || 0.0;
-        
+
         totalItems += quantity;
         totalPrice += price * quantity;
       }
-      
+
       // Log using the Rust op (simplified to avoid recursion)
       console.log(`Processing order ${orderId} for customer ${customerName}`);
-      
+
       // Create transformed data
       return {
         success: true,
         data: {
           table_info: {
             name: "orders",
-            schema: "public"
+            schema: "public",
+            columns: [
+              { name: "order_id", type: "string" },
+              { name: "customer_id", type: "string" },
+              { name: "customer_name", type: "string" },
+              { name: "total_items", type: "integer" },
+              { name: "total_price", type: "decimal" },
+            ]
           },
           data: {
             order_id: orderId,
@@ -97,14 +108,16 @@ function transform(input) {
         }
       };
     }
-    
+
     // Simple pass-through for other data
     return {
       success: true,
       data: {
         table_info: {
           name: "generic",
-          schema: "public"
+          schema: "public",
+          columns: [
+          ]
         },
         data: input
       }
@@ -112,7 +125,7 @@ function transform(input) {
   } catch (error) {
     // Log the error using a simpler approach
     console.log(`Error in transform: ${error.message}`);
-    
+
     return {
       success: false,
       error: `Error in transform: ${error.message}`

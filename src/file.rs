@@ -3,13 +3,13 @@ use prost::Message;
 use prost_reflect::prost_types::FileDescriptorSet;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
+use tokio_postgres::Client;
 use tracing::{info, warn};
 
 use crate::deno::DenoPlugin;
 use crate::postgres::insert_data;
-use postgres::Client;
 
 /// Reads and processes protobuf messages from a zstandard compressed file
 pub async fn process_file(
@@ -94,27 +94,27 @@ pub fn dynamic_message_to_json(message: &DynamicMessage) -> Result<serde_json::V
 }
 
 /// Reads all messages from the reader using the provided message descriptor
-fn read_messages<R: Read>(
+fn read_messages<R: BufRead>(
     reader: &mut R,
     msg_desc: &MessageDescriptor,
 ) -> Result<Vec<DynamicMessage>> {
     let mut messages = Vec::new();
 
+    println!("Reading Messages");
+
     loop {
-        // Try to read message length
         let mut len_buf = [0u8; 4];
         match reader.read_exact(&mut len_buf) {
             Ok(_) => {
                 let msg_len = u32::from_le_bytes(len_buf);
 
-                // Read message bytes
+                // Read pool bytes and decode
                 let mut msg_bytes = vec![0u8; msg_len as usize];
                 reader
                     .read_exact(&mut msg_bytes)
-                    .context("Failed to read message bytes")?;
-
+                    .context("Couldn't read message bytes")?;
                 // Decode message
-                let message = DynamicMessage::decode(msg_desc.clone(), msg_bytes.as_slice())
+                let message = DynamicMessage::decode(msg_desc.clone(), &msg_bytes[..])
                     .context("Failed to decode message")?;
 
                 messages.push(message);
@@ -145,7 +145,7 @@ async fn process_message(
     let transformed = crate::deno::transform_message(plugin, &json_value)?;
 
     // Insert the transformed data into PostgreSQL
-    insert_data(pg_client, &transformed)?;
+    insert_data(pg_client, &transformed).await?;
 
     Ok(())
 }

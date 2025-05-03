@@ -10,7 +10,7 @@ use kafka_postgres_transform::{config::AppConfig, deno, file, kafka, postgres};
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the JavaScript plugin
-    #[arg(short, long)]
+    #[arg(short = 'j', long)]
     plugin: PathBuf,
 
     /// PostgreSQL connection string
@@ -71,8 +71,9 @@ async fn main() -> Result<()> {
         deno::init_plugin(&args.plugin).context("Failed to initialize JavaScript plugin")?;
 
     // Initialize PostgreSQL connection
-    let mut pg_client =
-        postgres::init_client(&args.postgres_url).context("Failed to connect to PostgreSQL")?;
+    let mut pg_client = postgres::init_client(&args.postgres_url)
+        .await
+        .context("Failed to connect to PostgreSQL")?;
 
     match &args.command {
         Command::Kafka {

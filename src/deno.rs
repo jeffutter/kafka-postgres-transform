@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use deno_core::v8;
-use deno_core::{Extension, FastString, JsRuntime, RuntimeOptions};
+use deno_core::{FastString, JsRuntime, RuntimeOptions, extension};
 use serde_json::{Value, json};
 use std::path::Path;
 use tracing::{info, warn};
@@ -9,59 +9,13 @@ pub struct DenoPlugin {
     runtime: JsRuntime,
 }
 
-// Define a custom extension for logging
-fn create_log_extension() -> Extension {
-    // Create a simple extension with a JavaScript function for logging
-    Extension {
-        name: "ops",
-        js_files: std::borrow::Cow::Borrowed(&[
-            // Define the JavaScript code for the extension
-            deno_core::ExtensionFileSource {
-                specifier: "log.js",
-                code: deno_core::ExtensionFileSourceCode::IncludedInBinary(
-                    r#"
-                // Set up a simple logging mechanism that doesn't cause recursion
-                let logMessages = [];
-                
-                // Expose the function to the global scope
-                globalThis.Deno = {
-                    core: {
-                        ops: {
-                            op_log: function(message) {
-                                // Just store the message without calling opSync
-                                logMessages.push(message);
-                            }
-                        },
-                        opSync: function(name, ...args) {
-                            if (name === "op_log") {
-                                // Just store the message without calling console.log
-                                logMessages.push(args[0]);
-                                return null;
-                            }
-                            return null;
-                        }
-                    }
-                };
-                
-                // Simple console implementation
-                globalThis.console = {
-                    log: function(message) {
-                        logMessages.push(message);
-                    }
-                };
-                "#,
-                ),
-            },
-        ]),
-        esm_files: std::borrow::Cow::Borrowed(&[]),
-        esm_entry_point: None,
-        ops: std::borrow::Cow::Owned(vec![]),
-        op_state_fn: Some(Box::new(|state| {
-            state.put(());
-        })),
-        ..Default::default()
-    }
-}
+extension!(
+    init_console,
+    deps = [deno_console],
+    esm_entry_point = "ext:init_console/js-plugin/init.js",
+    esm = ["js-plugin/init.js"],
+    docs = "Init"
+);
 
 pub fn init_plugin(plugin_path: &Path) -> Result<DenoPlugin> {
     info!("Loading JavaScript plugin from: {:?}", plugin_path);
@@ -72,11 +26,9 @@ pub fn init_plugin(plugin_path: &Path) -> Result<DenoPlugin> {
 
     // Create a new Deno runtime with custom ops
     let mut runtime = JsRuntime::new(RuntimeOptions {
-        extensions: vec![create_log_extension()],
+        extensions: vec![deno_console::deno_console::init(), init_console::init()],
         ..Default::default()
     });
-
-    // No need for bootstrap code as it's included in the extension
 
     // Execute the JavaScript code
     runtime
@@ -93,8 +45,8 @@ pub fn transform_message(plugin: &mut DenoPlugin, message: &Value) -> Result<Val
     // Create the JavaScript code to call the transform function
     let js_code = format!(
         r#"
-        const input = {};
-        const result = transform(input);
+        var input = {};
+        var result = transform(input);
         JSON.stringify(result);
         "#,
         message_json
@@ -104,6 +56,11 @@ pub fn transform_message(plugin: &mut DenoPlugin, message: &Value) -> Result<Val
     let result = plugin
         .runtime
         .execute_script("<transform>", FastString::from(js_code.to_string()))
+        .inspect_err(|e| {
+            if let deno_core::error::CoreError::Js(js_error) = e {
+                warn!("Javascript Error: {js_error}");
+            }
+        })
         .context("Failed to call transform function in JavaScript plugin")?;
 
     // Get the result from the JavaScript execution
