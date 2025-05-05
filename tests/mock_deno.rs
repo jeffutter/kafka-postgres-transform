@@ -37,4 +37,34 @@ impl MockDenoPlugin {
 
         Ok(result)
     }
+    
+    pub fn message_key(&mut self, message: &Value) -> Result<String> {
+        // Extract the ID from the message and use it as the key
+        if let Some(id) = message.get("id") {
+            if let Some(id_num) = id.as_i64() {
+                return Ok(format!("key_{}", id_num));
+            }
+        }
+        
+        // Fallback if no ID is found
+        Ok("unknown_key".to_string())
+    }
+}
+
+impl kafka_postgres_transform::deno::DenoPluginTrait for MockDenoPlugin {
+    fn transform_message(&mut self, message: &Value) -> Result<Value> {
+        self.transform(message)
+    }
+
+    fn transform_messages_batch(&mut self, messages: &[&Value]) -> Result<Vec<Value>> {
+        messages.iter().map(|msg| self.transform(msg)).collect()
+    }
+    
+    fn message_key(&mut self, message: &Value) -> Result<String> {
+        self.message_key(message)
+    }
+    
+    fn message_key_batch(&mut self, messages: &[&Value]) -> Result<Vec<String>> {
+        messages.iter().map(|msg| self.message_key(msg)).collect()
+    }
 }

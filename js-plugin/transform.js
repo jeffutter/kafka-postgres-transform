@@ -133,5 +133,22 @@ function transform(input) {
   }
 }
 
-// Make the transform function available to the Deno runtime
+// Extract a key from the message
+function messageKey(input) {
+  // If the message has an ID, use that as the key
+  if (input.id) {
+    return `${input.id}`;
+  }
+  
+  // If the message has a name, use a hash of that
+  if (input.name) {
+    return `name_${input.name.replace(/\s+/g, '_')}`;
+  }
+  
+  // Fallback to a timestamp-based key
+  return `unknown_${Date.now()}`;
+}
+
+// Make the transform and messageKey functions available to the Deno runtime
 globalThis.transform = transform;
+globalThis.messageKey = messageKey;
