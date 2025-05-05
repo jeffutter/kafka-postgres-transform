@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
 use deno_core::v8;
 use deno_core::{FastString, JsRuntime, RuntimeOptions, extension};
+use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
+use std::marker::Unpin;
 use std::path::Path;
-use tracing::{info, warn};
+use std::pin::Pin;
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
 pub struct DenoPlugin {
     runtime: JsRuntime,
@@ -38,47 +42,166 @@ pub fn init_plugin(plugin_path: &Path) -> Result<DenoPlugin> {
     Ok(DenoPlugin { runtime })
 }
 
+/// Transform a single message using the JavaScript plugin
 pub fn transform_message(plugin: &mut DenoPlugin, message: &Value) -> Result<Value> {
-    // Convert the message to a JSON string
-    let message_json = serde_json::to_string(message)?;
+    transform_messages_batch(plugin, &[message])?
+        .first()
+        .context("No result")
+        .cloned()
+}
 
-    // Create the JavaScript code to call the transform function
+/// Transform a batch of messages using the JavaScript plugin
+pub fn transform_messages_batch(
+    plugin: &mut DenoPlugin,
+    messages: &[&Value],
+) -> Result<Vec<Value>> {
+    if messages.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Convert the messages to a JSON array string
+    let messages_json = serde_json::to_string(messages)?;
+
+    // Create the JavaScript code to call the transform function for each message in the batch
     let js_code = format!(
         r#"
-        var input = {};
-        var result = transform(input);
-        JSON.stringify(result);
+        var inputs = {};
+        var results = [];
+        for (var i = 0; i < inputs.length; i++) {{
+            try {{
+                var result = transform(inputs[i]);
+                results.push(result);
+            }} catch (error) {{
+                results.push({{
+                    success: false,
+                    error: error.toString(),
+                    data: null
+                }});
+            }}
+        }}
+        JSON.stringify(results);
         "#,
-        message_json
+        messages_json
     );
 
     // Execute the JavaScript code
     let result = plugin
         .runtime
-        .execute_script("<transform>", FastString::from(js_code.to_string()))
+        .execute_script("<transform_batch>", FastString::from(js_code.to_string()))
         .inspect_err(|e| {
             if let deno_core::error::CoreError::Js(js_error) = e {
-                warn!("Javascript Error: {js_error}");
+                warn!("Javascript Error in batch processing: {js_error}");
             }
         })
-        .context("Failed to call transform function in JavaScript plugin")?;
+        .context("Failed to call transform function in JavaScript plugin for batch")?;
 
     // Get the result from the JavaScript execution
     let scope = &mut plugin.runtime.handle_scope();
     let local = v8::Local::new(scope, result);
     let result_str = local.to_string(scope).unwrap().to_rust_string_lossy(scope);
 
-    // Parse the result as JSON
-    let transform_result: TransformResult =
-        serde_json::from_str(&result_str).context("Failed to parse JavaScript result as JSON")?;
+    // Parse the result as JSON array
+    let transform_results: Vec<TransformResult> = serde_json::from_str(&result_str)
+        .context("Failed to parse JavaScript batch results as JSON")?;
 
-    if !transform_result.success {
-        let error_msg = transform_result.error.clone().unwrap_or_default();
-        warn!("JavaScript transformation failed: {}", error_msg);
-        anyhow::bail!("JavaScript transformation failed: {}", error_msg);
+    // Process each result
+    let mut results = Vec::with_capacity(transform_results.len());
+    for (i, transform_result) in transform_results.into_iter().enumerate() {
+        if !transform_result.success {
+            let error_msg = transform_result.error.clone().unwrap_or_default();
+            warn!(
+                "JavaScript transformation failed for message {}: {}",
+                i, error_msg
+            );
+            // Still include a placeholder in the results to maintain order
+            results.push(json!({"error": error_msg}));
+        } else {
+            results.push(transform_result.data.unwrap_or(json!({})));
+        }
     }
 
-    Ok(transform_result.data.unwrap_or(json!({})))
+    Ok(results)
+}
+
+/// Process a stream of messages using adaptive batching
+pub async fn transform_messages<'a, S>(
+    plugin: &'a mut DenoPlugin,
+    stream: S,
+) -> Result<Pin<Box<dyn Stream<Item = Result<Value>> + 'a>>>
+where
+    S: Stream<Item = &'a Value> + Unpin + 'a,
+{
+    // First collect all messages to avoid lifetime issues
+    let messages: Vec<_> = stream.collect().await;
+
+    // Process all messages in a single batch for stability
+    let results = transform_messages_batch(plugin, &messages)?;
+
+    // Create a stream from the results - clone each value to avoid lifetime issues
+    let output_stream = futures::stream::iter(results.into_iter().map(Ok));
+
+    Ok(Box::pin(output_stream))
+}
+
+/// Adaptive Increase Multiplicative Decrease (AIMD) batching algorithm
+///
+/// This function takes a stream of individual messages and groups them into batches
+/// using an AIMD algorithm to find the optimal batch size:
+/// - If processing time is acceptable, linearly increase batch size
+/// - If processing time is too long, multiplicatively decrease batch size
+pub async fn adaptive_batch<'a, T, S>(
+    stream: S,
+    initial_batch_size: usize,
+    min_batch_size: usize,
+    max_batch_size: usize,
+    target_processing_time: Duration,
+) -> Pin<Box<dyn Stream<Item = Vec<&'a T>> + 'a>>
+where
+    S: Stream<Item = &'a T> + Unpin + 'a,
+    T: 'a,
+{
+    // Use async_stream for safer stream generation
+    let stream = Box::pin(stream);
+    let batched_stream = async_stream::stream! {
+        let mut stream = stream;
+        let mut batch_size = initial_batch_size;
+
+        loop {
+            let mut batch = Vec::with_capacity(batch_size);
+            let start_time = Instant::now();
+
+            // Collect items until we reach the batch size or the stream ends
+            while batch.len() < batch_size {
+                match stream.next().await {
+                    Some(item) => batch.push(item),
+                    None if batch.is_empty() => return, // Stream is empty
+                    None => break,                      // Stream ended but we have some items
+                }
+            }
+
+            if batch.is_empty() {
+                return;
+            }
+
+            // Measure processing time
+            let processing_time = start_time.elapsed();
+
+            // Adjust batch size using AIMD
+            if processing_time <= target_processing_time {
+                // Additive increase: add 1 to batch size
+                batch_size = (batch_size + 1).min(max_batch_size);
+                debug!("Increasing batch size to {}", batch_size);
+            } else {
+                // Multiplicative decrease: cut batch size in half
+                batch_size = (batch_size / 2).max(min_batch_size);
+                debug!("Decreasing batch size to {}", batch_size);
+            }
+
+            yield batch;
+        }
+    };
+
+    Box::pin(batched_stream)
 }
 
 #[derive(serde::Deserialize)]

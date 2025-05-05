@@ -1,4 +1,5 @@
 use anyhow::Result;
+use futures::StreamExt;
 use kafka_postgres_transform::{file, protobuf};
 mod mock_deno;
 use mock_deno::MockDenoPlugin;
@@ -40,11 +41,13 @@ async fn test_file_processing() -> Result<()> {
     // Read the messages from the file
     let (_pool, messages) = file::read_pool_and_messages(&file_path, "test.Customer")?;
 
+    let messages = messages.collect::<Vec<_>>().await;
+
     // Verify we have the expected number of messages
     assert_eq!(messages.len(), 2, "Expected 2 messages in the test file");
 
     // Convert the first message to JSON and verify its content
-    let json_value = protobuf::dynamic_message_to_json(&messages[0])?;
+    let json_value = protobuf::dynamic_message_to_json(messages[0].as_ref().unwrap())?;
     assert_eq!(
         json_value["id"].as_i64(),
         Some(1),

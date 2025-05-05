@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
+use futures::{Stream, StreamExt};
 use prost::Message;
 use prost_reflect::prost_types::FileDescriptorSet;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
+use tokio::pin;
 use tokio_postgres::Client;
 use tracing::{info, warn};
 
@@ -23,13 +25,17 @@ pub async fn process_file(
     // Read and decompress the file
     let (_pool, messages) = read_pool_and_messages(file_path, type_name)?;
 
-    info!("Found {} messages in file", messages.len());
+    let (maybe_messages, _) = messages.size_hint();
+
+    info!("Found {:?} messages in file", maybe_messages);
 
     let mut success_count = 0;
 
+    pin!(messages);
+
     // Process each message
-    for (i, message) in messages.iter().enumerate() {
-        match process_message(message, plugin, pg_client).await {
+    while let Some((i, message)) = messages.as_mut().enumerate().next().await {
+        match process_message(&message?, plugin, pg_client).await {
             Ok(_) => {
                 success_count += 1;
             }
@@ -41,8 +47,7 @@ pub async fn process_file(
 
     info!(
         "Successfully processed {}/{} messages",
-        success_count,
-        messages.len()
+        success_count, maybe_messages
     );
 
     Ok(success_count)
@@ -52,7 +57,7 @@ pub async fn process_file(
 pub fn read_pool_and_messages(
     path: &Path,
     type_name: &str,
-) -> Result<(DescriptorPool, Vec<DynamicMessage>)> {
+) -> Result<(DescriptorPool, impl Stream<Item = Result<DynamicMessage>>)> {
     // Open the compressed file
     let file = File::open(path).context("Failed to open file")?;
 
@@ -83,7 +88,7 @@ pub fn read_pool_and_messages(
         .ok_or_else(|| anyhow::anyhow!("Message type {} not found", type_name))?;
 
     // Read all messages
-    let messages = read_messages(&mut reader, &msg_desc).context("Failed to read messages")?;
+    let messages = read_messages(reader, msg_desc);
 
     Ok((pool, messages))
 }
@@ -95,41 +100,43 @@ pub fn dynamic_message_to_json(message: &DynamicMessage) -> Result<serde_json::V
 
 /// Reads all messages from the reader using the provided message descriptor
 fn read_messages<R: BufRead>(
-    reader: &mut R,
-    msg_desc: &MessageDescriptor,
-) -> Result<Vec<DynamicMessage>> {
-    let mut messages = Vec::new();
-
+    mut reader: R,
+    msg_desc: MessageDescriptor,
+) -> impl Stream<Item = Result<DynamicMessage>> {
     println!("Reading Messages");
 
-    loop {
-        let mut len_buf = [0u8; 4];
-        match reader.read_exact(&mut len_buf) {
-            Ok(_) => {
-                let msg_len = u32::from_le_bytes(len_buf);
+    let stream = async_stream::try_stream! {
+        loop {
+            let mut len_buf = [0u8; 4];
+            match reader.read_exact(&mut len_buf) {
+                Ok(_) => {
+                    let msg_len = u32::from_le_bytes(len_buf);
 
-                // Read pool bytes and decode
-                let mut msg_bytes = vec![0u8; msg_len as usize];
-                reader
-                    .read_exact(&mut msg_bytes)
-                    .context("Couldn't read message bytes")?;
-                // Decode message
-                let message = DynamicMessage::decode(msg_desc.clone(), &msg_bytes[..])
-                    .context("Failed to decode message")?;
+                    // Read pool bytes and decode
+                    let mut msg_bytes = vec![0u8; msg_len as usize];
 
-                messages.push(message);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // End of file reached
-                break;
-            }
-            Err(e) => {
-                return Err(e.into());
+                    reader
+                        .read_exact(&mut msg_bytes)
+                        .context("Couldn't read message bytes")?;
+
+                    // Decode message
+                    let message = DynamicMessage::decode(msg_desc.clone(), &msg_bytes[..])
+                        .context("Failed to decode message")?;
+
+                    yield message;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // End of file reached
+                    break;
+                }
+                Err(e) => {
+                    Err::<DynamicMessage, anyhow::Error>(e.into())?;
+                }
             }
         }
-    }
+    };
 
-    Ok(messages)
+    stream
 }
 
 /// Processes a single message by transforming it and inserting into PostgreSQL
