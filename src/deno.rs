@@ -3,14 +3,21 @@ use deno_core::v8;
 use deno_core::{FastString, JsRuntime, RuntimeOptions, extension};
 use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::marker::Unpin;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+use twox_hash::XxHash64;
 
 pub struct DenoPlugin {
-    runtime: JsRuntime,
+    runtimes: Vec<Option<JsRuntime>>,
+    num_cores: usize,
+    // Track the order of runtime creation for proper cleanup
+    runtime_creation_order: Vec<usize>,
 }
 
 extension!(
@@ -27,24 +34,60 @@ pub fn init_plugin(plugin_path: &Path) -> Result<DenoPlugin> {
     // Read the JavaScript file
     let js_code =
         std::fs::read_to_string(plugin_path).context("Failed to read JavaScript plugin file")?;
+    let js_code = Arc::new(js_code);
 
-    // Create a new Deno runtime with custom ops
-    let mut runtime = JsRuntime::new(RuntimeOptions {
-        extensions: vec![deno_console::deno_console::init(), init_console::init()],
-        ..Default::default()
-    });
+    // Determine the number of cores available
+    let num_cores = num_cpus::get();
+    info!("Creating {} JavaScript runtimes (one per core)", num_cores);
 
-    // Execute the JavaScript code
-    runtime
-        .execute_script("<anon>", FastString::from(js_code.to_string()))
-        .context("Failed to execute JavaScript plugin")?;
+    // Create a runtime for each core
+    let mut runtimes = Vec::with_capacity(num_cores);
 
-    Ok(DenoPlugin { runtime })
+    for core_id in 0..num_cores {
+        let js_code = Arc::clone(&js_code);
+
+        // Create a new Deno runtime with custom ops
+        let mut runtime = JsRuntime::new(RuntimeOptions {
+            extensions: vec![deno_console::deno_console::init(), init_console::init()],
+            ..Default::default()
+        });
+
+        // Pin to specific core if possible
+        #[cfg(target_os = "linux")]
+        {
+            let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+            if let Some(core) = core_ids.get(core_id) {
+                info!("Pinning runtime {} to core {:?}", core_id, core);
+                core_affinity::set_for_current(*core);
+            }
+        }
+
+        // Execute the JavaScript code
+        runtime
+            .execute_script("<anon>", FastString::from(js_code.to_string()))
+            .with_context(|| {
+                format!(
+                    "Failed to execute JavaScript plugin for runtime {}",
+                    core_id
+                )
+            })?;
+
+        runtimes.push(Some(runtime));
+    }
+
+    // Track the order of runtime creation for proper cleanup
+    let runtime_creation_order = (0..num_cores).collect();
+
+    Ok(DenoPlugin {
+        runtimes,
+        num_cores,
+        runtime_creation_order,
+    })
 }
 
 /// Transform a single message using the JavaScript plugin
-pub fn transform_message(plugin: &mut DenoPlugin, message: &Value) -> Result<Value> {
-    transform_messages_batch(plugin, &[message])?
+pub fn transform_message(plugin: &mut DenoPlugin, key: &str, message: &Value) -> Result<Value> {
+    transform_messages_batch(plugin, &[(key.to_string(), message)])?
         .first()
         .context("No result")
         .cloned()
@@ -53,74 +96,128 @@ pub fn transform_message(plugin: &mut DenoPlugin, message: &Value) -> Result<Val
 /// Transform a batch of messages using the JavaScript plugin
 pub fn transform_messages_batch(
     plugin: &mut DenoPlugin,
-    messages: &[&Value],
+    messages: &[(String, &Value)],
 ) -> Result<Vec<Value>> {
     if messages.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Convert the messages to a JSON array string
-    let messages_json = serde_json::to_string(messages)?;
+    // Group messages by runtime using consistent hashing
+    let mut runtime_messages: Vec<Vec<&Value>> = vec![Vec::new(); plugin.num_cores];
+    let mut key_to_runtime_index: HashMap<usize, usize> = HashMap::new();
 
-    // Create the JavaScript code to call the transform function for each message in the batch
-    let js_code = format!(
-        r#"
-        var inputs = {};
-        var results = [];
-        for (var i = 0; i < inputs.length; i++) {{
-            try {{
-                var result = transform(inputs[i]);
-                results.push(result);
-            }} catch (error) {{
-                results.push({{
-                    success: false,
-                    error: error.toString(),
-                    data: null
-                }});
+    for (i, (key, message)) in messages.iter().enumerate() {
+        let runtime_idx = get_runtime_index(key, plugin.num_cores);
+        runtime_messages[runtime_idx].push(message);
+        key_to_runtime_index.insert(i, runtime_idx);
+    }
+
+    // Process each batch on its assigned runtime
+    let mut all_results: Vec<Option<Value>> = vec![None; messages.len()];
+
+    for (runtime_idx, batch) in runtime_messages.iter().enumerate() {
+        if batch.is_empty() {
+            continue;
+        }
+
+        // Convert the messages to a JSON array string
+        let messages_json = serde_json::to_string(batch)?;
+
+        // Create the JavaScript code to call the transform function for each message in the batch
+        let js_code = format!(
+            r#"
+            var inputs = {};
+            var results = [];
+            for (var i = 0; i < inputs.length; i++) {{
+                try {{
+                    var result = transform(inputs[i]);
+                    results.push(result);
+                }} catch (error) {{
+                    results.push({{
+                        success: false,
+                        error: error.toString(),
+                        data: null
+                    }});
+                }}
             }}
-        }}
-        JSON.stringify(results);
-        "#,
-        messages_json
-    );
+            JSON.stringify(results);
+            "#,
+            messages_json
+        );
 
-    // Execute the JavaScript code
-    let result = plugin
-        .runtime
-        .execute_script("<transform_batch>", FastString::from(js_code.to_string()))
-        .inspect_err(|e| {
-            if let deno_core::error::CoreError::Js(js_error) = e {
-                warn!("Javascript Error in batch processing: {js_error}");
+        // Execute the JavaScript code on the appropriate runtime
+        let result = plugin
+            .runtimes[runtime_idx].as_mut().unwrap()
+            .execute_script("<transform_batch>", FastString::from(js_code.to_string()))
+            .inspect_err(|e| {
+                if let deno_core::error::CoreError::Js(js_error) = e {
+                    warn!("Javascript Error in batch processing on runtime {}: {js_error}", runtime_idx);
+                }
+            })
+            .with_context(|| format!("Failed to call transform function in JavaScript plugin for batch on runtime {}", runtime_idx))?;
+
+        // Get the result from the JavaScript execution
+        let scope = &mut plugin.runtimes[runtime_idx]
+            .as_mut()
+            .unwrap()
+            .handle_scope();
+        let local = v8::Local::new(scope, result);
+        let result_str = local.to_string(scope).unwrap().to_rust_string_lossy(scope);
+
+        // Parse the result as JSON array
+        let transform_results: Vec<TransformResult> = serde_json::from_str(&result_str)
+            .context("Failed to parse JavaScript batch results as JSON")?;
+
+        // Map results back to their original positions
+        let mut batch_index = 0;
+        for (i, (key, _)) in messages.iter().enumerate() {
+            if key_to_runtime_index.get(&i) == Some(&runtime_idx) {
+                if let Some(transform_result) = transform_results.get(batch_index) {
+                    if !transform_result.success {
+                        let error_msg = transform_result.error.clone().unwrap_or_default();
+                        warn!(
+                            "JavaScript transformation failed for message with key {}: {}",
+                            key, error_msg
+                        );
+                        all_results[i] = Some(json!({"error": error_msg}));
+                    } else {
+                        all_results[i] = transform_result.data.clone();
+                    }
+                }
+                batch_index += 1;
             }
-        })
-        .context("Failed to call transform function in JavaScript plugin for batch")?;
-
-    // Get the result from the JavaScript execution
-    let scope = &mut plugin.runtime.handle_scope();
-    let local = v8::Local::new(scope, result);
-    let result_str = local.to_string(scope).unwrap().to_rust_string_lossy(scope);
-
-    // Parse the result as JSON array
-    let transform_results: Vec<TransformResult> = serde_json::from_str(&result_str)
-        .context("Failed to parse JavaScript batch results as JSON")?;
-
-    // Process each result
-    let mut results = Vec::with_capacity(transform_results.len());
-    for (i, transform_result) in transform_results.into_iter().enumerate() {
-        if !transform_result.success {
-            let error_msg = transform_result.error.clone().unwrap_or_default();
-            warn!(
-                "JavaScript transformation failed for message {}: {}",
-                i, error_msg
-            );
-            // Still include a placeholder in the results to maintain order
-            results.push(json!({"error": error_msg}));
-        } else {
-            results.push(transform_result.data.unwrap_or(json!({})));
         }
     }
 
+    // Collect all results, using empty JSON objects for any missing results
+    let results = all_results
+        .into_iter()
+        .map(|r| r.unwrap_or_else(|| json!({})))
+        .collect();
+
     Ok(results)
+}
+
+/// Calculate the runtime index for a given key using consistent hashing
+fn get_runtime_index(key: &str, num_cores: usize) -> usize {
+    let mut hasher = XxHash64::default();
+    key.hash(&mut hasher);
+    (hasher.finish() % num_cores as u64) as usize
+}
+
+impl Drop for DenoPlugin {
+    fn drop(&mut self) {
+        // Drop runtimes in reverse order of creation
+        for &idx in self.runtime_creation_order.iter().rev() {
+            if idx < self.runtimes.len() {
+                // Take ownership of the runtime
+                if let Some(runtime) = self.runtimes[idx].take() {
+                    // Drop it explicitly
+                    drop(runtime);
+                }
+            }
+        }
+    }
 }
 
 /// Process a stream of messages using adaptive batching
@@ -129,13 +226,19 @@ pub async fn transform_messages<'a, S>(
     stream: S,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<Value>> + 'a>>>
 where
-    S: Stream<Item = &'a Value> + Unpin + 'a,
+    S: Stream<Item = (&'a str, &'a Value)> + Unpin + 'a,
 {
     // First collect all messages to avoid lifetime issues
     let messages: Vec<_> = stream.collect().await;
 
+    // Convert to the format expected by transform_messages_batch
+    let keyed_messages: Vec<(String, &Value)> = messages
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect();
+
     // Process all messages in a single batch for stability
-    let results = transform_messages_batch(plugin, &messages)?;
+    let results = transform_messages_batch(plugin, &keyed_messages)?;
 
     // Create a stream from the results - clone each value to avoid lifetime issues
     let output_stream = futures::stream::iter(results.into_iter().map(Ok));
@@ -149,16 +252,17 @@ where
 /// using an AIMD algorithm to find the optimal batch size:
 /// - If processing time is acceptable, linearly increase batch size
 /// - If processing time is too long, multiplicatively decrease batch size
-pub async fn adaptive_batch<'a, T, S>(
+pub async fn adaptive_batch<'a, K, V, S>(
     stream: S,
     initial_batch_size: usize,
     min_batch_size: usize,
     max_batch_size: usize,
     target_processing_time: Duration,
-) -> Pin<Box<dyn Stream<Item = Vec<&'a T>> + 'a>>
+) -> Pin<Box<dyn Stream<Item = Vec<(&'a K, &'a V)>> + 'a>>
 where
-    S: Stream<Item = &'a T> + Unpin + 'a,
-    T: 'a,
+    S: Stream<Item = (&'a K, &'a V)> + Unpin + 'a,
+    K: 'a + AsRef<str>,
+    V: 'a,
 {
     // Use async_stream for safer stream generation
     let stream = Box::pin(stream);

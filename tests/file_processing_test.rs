@@ -7,7 +7,7 @@ use prost::Message;
 use prost_reflect::prost_types::FileDescriptorSet;
 use prost_reflect::{DescriptorPool, DynamicMessage};
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -39,7 +39,8 @@ async fn test_file_processing() -> Result<()> {
     create_test_protobuf_file(&file_path)?;
 
     // Read the messages from the file
-    let (_pool, messages) = file::read_pool_and_messages(&file_path, "test.Customer")?;
+    let (_num_messages, _pool, messages) =
+        file::read_pool_and_messages(&file_path, "test.Customer")?;
 
     let messages = messages.collect::<Vec<_>>().await;
 
@@ -47,7 +48,7 @@ async fn test_file_processing() -> Result<()> {
     assert_eq!(messages.len(), 2, "Expected 2 messages in the test file");
 
     // Convert the first message to JSON and verify its content
-    let json_value = protobuf::dynamic_message_to_json(messages[0].as_ref().unwrap())?;
+    let json_value = protobuf::dynamic_message_to_json(&messages[0].as_ref().unwrap().1)?;
     assert_eq!(
         json_value["id"].as_i64(),
         Some(1),
@@ -91,32 +92,37 @@ fn create_test_protobuf_file(path: &Path) -> Result<()> {
     let pool = DescriptorPool::from_file_descriptor_set(file_descriptor_set)?;
     let msg_desc = pool.get_message_by_name("test.Customer").unwrap();
 
-    let message1 = create_test_message(&msg_desc, 1, "Test Customer")?;
-    let message2 = create_test_message(&msg_desc, 2, "Another Customer")?;
+    let (key1, message1) = create_test_message(&msg_desc, 1, "Test Customer")?;
+    let (key2, message2) = create_test_message(&msg_desc, 2, "Another Customer")?;
 
     let encoded_msg1 = message1.encode_to_vec();
     let encoded_msg2 = message2.encode_to_vec();
 
     // Create a zstandard compressed file
-    let file = File::create(path)?;
-    let encoder = zstd::Encoder::new(file, 3)?;
-    let mut writer = BufWriter::new(encoder);
+    let mut file = File::create(path)?;
+    // Write num messages
+    file.write_all(&2u32.to_le_bytes())?;
+    let mut encoder = zstd::Encoder::new(file, 3)?;
 
     // Write the file descriptor set length and data
-    writer.write_all(&(encoded_fds.len() as u32).to_le_bytes())?;
-    writer.write_all(&encoded_fds)?;
+    encoder.write_all(&(encoded_fds.len() as u32).to_le_bytes())?;
+    encoder.write_all(&encoded_fds)?;
 
     // Write the first message length and data
-    writer.write_all(&(encoded_msg1.len() as u32).to_le_bytes())?;
-    writer.write_all(&encoded_msg1)?;
+    encoder.write_all(&(key1.len() as u32).to_le_bytes())?;
+    encoder.write_all(key1.as_bytes())?;
+    encoder.write_all(&(encoded_msg1.len() as u32).to_le_bytes())?;
+    encoder.write_all(&encoded_msg1)?;
 
     // Write the second message length and data
-    writer.write_all(&(encoded_msg2.len() as u32).to_le_bytes())?;
-    writer.write_all(&encoded_msg2)?;
+    encoder.write_all(&(key2.len() as u32).to_le_bytes())?;
+    encoder.write_all(key2.as_bytes())?;
+    encoder.write_all(&(encoded_msg2.len() as u32).to_le_bytes())?;
+    encoder.write_all(&encoded_msg2)?;
 
     // Finish the compression
+    let mut writer = encoder.finish()?;
     writer.flush()?;
-    // The encoder will be finished when writer is dropped
 
     Ok(())
 }
@@ -174,12 +180,12 @@ fn create_test_message(
     descriptor: &prost_reflect::MessageDescriptor,
     id: i32,
     name: &str,
-) -> Result<DynamicMessage> {
+) -> Result<(String, DynamicMessage)> {
     let mut message = DynamicMessage::new(descriptor.clone());
 
     // Set the fields
     message.set_field_by_name("id", prost_reflect::Value::I32(id));
     message.set_field_by_name("name", prost_reflect::Value::String(name.to_string()));
 
-    Ok(message)
+    Ok((id.to_string(), message))
 }

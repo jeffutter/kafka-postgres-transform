@@ -74,8 +74,11 @@ pub async fn consume_messages(
                     }
                 };
 
+                let key = String::from_utf8(msg.key().unwrap_or(&[]).to_vec())?;
+
                 // Process the message
                 match process_message(
+                    key,
                     payload,
                     &sr_settings,
                     &mut plugin,
@@ -106,6 +109,7 @@ pub async fn consume_messages(
 }
 
 async fn process_message(
+    key: String,
     payload: &[u8],
     sr_settings: &SrSettings,
     plugin: &mut DenoPlugin,
@@ -121,7 +125,7 @@ async fn process_message(
         .context("Failed to decode Protobuf message")?;
 
     // Transform the message using the JavaScript plugin
-    let transformed = crate::deno::transform_message(plugin, &decoded)
+    let transformed = crate::deno::transform_message(plugin, &key, &decoded)
         .context("Failed to transform message with JavaScript plugin")?;
 
     // Insert into PostgreSQL

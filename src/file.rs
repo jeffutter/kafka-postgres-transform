@@ -13,6 +13,8 @@ use tracing::{info, warn};
 use crate::deno::DenoPlugin;
 use crate::postgres::insert_data;
 
+type MessageStreamResult = Result<(String, DynamicMessage)>;
+
 /// Reads and processes protobuf messages from a zstandard compressed file
 pub async fn process_file(
     file_path: &Path,
@@ -23,19 +25,17 @@ pub async fn process_file(
     info!("Processing protobuf messages from file: {:?}", file_path);
 
     // Read and decompress the file
-    let (_pool, messages) = read_pool_and_messages(file_path, type_name)?;
+    let (num_messages, _pool, messages) = read_pool_and_messages(file_path, type_name)?;
 
-    let (maybe_messages, _) = messages.size_hint();
-
-    info!("Found {:?} messages in file", maybe_messages);
+    info!("Found {num_messages} messages in file");
 
     let mut success_count = 0;
 
     pin!(messages);
 
     // Process each message
-    while let Some((i, message)) = messages.as_mut().enumerate().next().await {
-        match process_message(&message?, plugin, pg_client).await {
+    while let Some((i, Ok((key, message)))) = messages.as_mut().enumerate().next().await {
+        match process_message(key, &message, plugin, pg_client).await {
             Ok(_) => {
                 success_count += 1;
             }
@@ -47,7 +47,7 @@ pub async fn process_file(
 
     info!(
         "Successfully processed {}/{} messages",
-        success_count, maybe_messages
+        success_count, num_messages
     );
 
     Ok(success_count)
@@ -57,9 +57,14 @@ pub async fn process_file(
 pub fn read_pool_and_messages(
     path: &Path,
     type_name: &str,
-) -> Result<(DescriptorPool, impl Stream<Item = Result<DynamicMessage>>)> {
+) -> Result<(u32, DescriptorPool, impl Stream<Item = MessageStreamResult>)> {
     // Open the compressed file
-    let file = File::open(path).context("Failed to open file")?;
+    let mut file = File::open(path).context("Failed to open file")?;
+
+    let mut num_messages_buf = [0u8; 4];
+    file.read_exact(&mut num_messages_buf)
+        .context("Failed to read num messages")?;
+    let num_messages = u32::from_le_bytes(num_messages_buf);
 
     // Create a zstd decoder with BufReader
     let decoder = zstd::Decoder::new(file).context("Failed to create zstd decoder")?;
@@ -90,7 +95,7 @@ pub fn read_pool_and_messages(
     // Read all messages
     let messages = read_messages(reader, msg_desc);
 
-    Ok((pool, messages))
+    Ok((num_messages, pool, messages))
 }
 
 /// Converts a dynamic message to JSON (helper function for tests)
@@ -102,28 +107,50 @@ pub fn dynamic_message_to_json(message: &DynamicMessage) -> Result<serde_json::V
 fn read_messages<R: BufRead>(
     mut reader: R,
     msg_desc: MessageDescriptor,
-) -> impl Stream<Item = Result<DynamicMessage>> {
+) -> impl Stream<Item = Result<(String, DynamicMessage)>> {
     println!("Reading Messages");
 
     let stream = async_stream::try_stream! {
         loop {
-            let mut len_buf = [0u8; 4];
-            match reader.read_exact(&mut len_buf) {
-                Ok(_) => {
-                    let msg_len = u32::from_le_bytes(len_buf);
-
+            let mut key_len_buf = [0u8; 4];
+            match reader.read_exact(&mut key_len_buf) {
+            Ok(_) => {
+                    let key_len = u32::from_le_bytes(key_len_buf);
                     // Read pool bytes and decode
-                    let mut msg_bytes = vec![0u8; msg_len as usize];
+                    let mut key_bytes = vec![0u8; key_len as usize];
 
                     reader
-                        .read_exact(&mut msg_bytes)
-                        .context("Couldn't read message bytes")?;
+                        .read_exact(&mut key_bytes)
+                        .context("Couldn't read message key bytes")?;
 
-                    // Decode message
-                    let message = DynamicMessage::decode(msg_desc.clone(), &msg_bytes[..])
-                        .context("Failed to decode message")?;
+                    let key = String::from_utf8(key_bytes)?;
 
-                    yield message;
+                    let mut len_buf = [0u8; 4];
+                    match reader.read_exact(&mut len_buf) {
+                        Ok(_) => {
+                            let msg_len = u32::from_le_bytes(len_buf);
+
+                            // Read pool bytes and decode
+                            let mut msg_bytes = vec![0u8; msg_len as usize];
+
+                            reader
+                                .read_exact(&mut msg_bytes)
+                                .context("Couldn't read message bytes")?;
+
+                            // Decode message
+                            let message = DynamicMessage::decode(msg_desc.clone(), &msg_bytes[..])
+                                .context("Failed to decode message")?;
+
+                            yield (key, message);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                            // End of file reached
+                            break;
+                        }
+                        Err(e) => {
+                            Err::<DynamicMessage, anyhow::Error>(e.into())?;
+                        }
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     // End of file reached
@@ -132,7 +159,7 @@ fn read_messages<R: BufRead>(
                 Err(e) => {
                     Err::<DynamicMessage, anyhow::Error>(e.into())?;
                 }
-            }
+        }
         }
     };
 
@@ -141,6 +168,7 @@ fn read_messages<R: BufRead>(
 
 /// Processes a single message by transforming it and inserting into PostgreSQL
 async fn process_message(
+    key: String,
     message: &DynamicMessage,
     plugin: &mut DenoPlugin,
     pg_client: &mut Client,
@@ -149,7 +177,7 @@ async fn process_message(
     let json_value = crate::protobuf::dynamic_message_to_json(message)?;
 
     // Transform the message using the JavaScript plugin
-    let transformed = crate::deno::transform_message(plugin, &json_value)?;
+    let transformed = crate::deno::transform_message(plugin, &key, &json_value)?;
 
     // Insert the transformed data into PostgreSQL
     insert_data(pg_client, &transformed).await?;

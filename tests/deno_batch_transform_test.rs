@@ -20,17 +20,20 @@ async fn test_transform_message() -> Result<()> {
         return Ok(());
     }
 
-    // Initialize the plugin - create a new instance for each test
-    let mut plugin = deno::init_plugin(js_path)?;
-
     // Create a test message
     let message = json!({
         "id": 42,
         "name": "Test Customer"
     });
 
-    // Transform the message
-    let result = deno::transform_message(&mut plugin, &message)?;
+    // Initialize the plugin in a separate scope to ensure it's dropped properly
+    let result = {
+        // Initialize the plugin - create a new instance for each test
+        let mut plugin = deno::init_plugin(js_path)?;
+
+        // Transform the message
+        deno::transform_message(&mut plugin, "42", &message)?
+    };
 
     // Verify the result
     assert!(
@@ -73,30 +76,43 @@ async fn test_transform_messages() -> Result<()> {
         return Ok(());
     }
 
-    // Initialize the plugin - create a new instance for each test
-    let mut plugin = deno::init_plugin(js_path)?;
-
     // Create test messages that will live for the duration of the test
     let messages = vec![
-        json!({
-            "id": 1,
-            "name": "Customer One"
-        }),
-        json!({
-            "id": 2,
-            "name": "Customer Two"
-        }),
-        json!({
-            "id": 3,
-            "name": "Customer Three"
-        }),
+        (
+            "1",
+            json!({
+                "id": 1,
+                "name": "Customer One"
+            }),
+        ),
+        (
+            "2",
+            json!({
+                "id": 2,
+                "name": "Customer Two"
+            }),
+        ),
+        (
+            "3",
+            json!({
+                "id": 3,
+                "name": "Customer Three"
+            }),
+        ),
     ];
 
     // Create references to the messages for the stream
-    let message_refs: Vec<&Value> = messages.iter().collect();
+    let message_refs: Vec<(String, &Value)> =
+        messages.iter().map(|(k, v)| (k.to_string(), v)).collect();
 
-    // Process messages in a batch directly instead of using streams
-    let results = deno::transform_messages_batch(&mut plugin, &message_refs)?;
+    // Initialize the plugin in a separate scope to ensure it's dropped properly
+    let results = {
+        // Initialize the plugin - create a new instance for each test
+        let mut plugin = deno::init_plugin(js_path)?;
+
+        // Process messages in a batch directly instead of using streams
+        deno::transform_messages_batch(&mut plugin, &message_refs)?
+    };
 
     // Verify the results
     assert_eq!(results.len(), 3, "Expected 3 results");
@@ -159,30 +175,43 @@ async fn test_transform_messages_batch() -> Result<()> {
         return Ok(());
     }
 
-    // Initialize the plugin
-    let mut plugin = deno::init_plugin(js_path)?;
-
     // Create test messages
     let messages = vec![
-        json!({
-            "id": 1,
-            "name": "Customer One"
-        }),
-        json!({
-            "id": 2,
-            "name": "Customer Two"
-        }),
-        json!({
-            "id": 3,
-            "name": "Customer Three"
-        }),
+        (
+            "1",
+            json!({
+                "id": 1,
+                "name": "Customer One"
+            }),
+        ),
+        (
+            "2",
+            json!({
+                "id": 2,
+                "name": "Customer Two"
+            }),
+        ),
+        (
+            "3",
+            json!({
+                "id": 3,
+                "name": "Customer Three"
+            }),
+        ),
     ];
 
-    // Create references to the messages for the batch
-    let message_refs: Vec<&Value> = messages.iter().collect();
+    // Create references to the messages for the stream
+    let message_refs: Vec<(String, &Value)> =
+        messages.iter().map(|(k, v)| (k.to_string(), v)).collect();
 
-    // Transform the messages as a batch
-    let results = deno::transform_messages_batch(&mut plugin, &message_refs)?;
+    // Initialize the plugin in a separate scope to ensure it's dropped properly
+    let results = {
+        // Initialize the plugin
+        let mut plugin = deno::init_plugin(js_path)?;
+
+        // Process messages in a batch directly instead of using streams
+        deno::transform_messages_batch(&mut plugin, &message_refs)?
+    };
 
     // Verify the results
     assert_eq!(results.len(), 3, "Expected 3 results");
@@ -237,20 +266,24 @@ async fn test_transform_messages_batch() -> Result<()> {
 async fn test_adaptive_batch() -> Result<()> {
     // Create test messages that will live for the duration of the test
     let messages = vec![
-        json!({ "id": 1, "name": "Customer 1" }),
-        json!({ "id": 2, "name": "Customer 2" }),
-        json!({ "id": 3, "name": "Customer 3" }),
-        json!({ "id": 4, "name": "Customer 4" }),
-        json!({ "id": 5, "name": "Customer 5" }),
-        json!({ "id": 6, "name": "Customer 6" }),
-        json!({ "id": 7, "name": "Customer 7" }),
-        json!({ "id": 8, "name": "Customer 8" }),
-        json!({ "id": 9, "name": "Customer 9" }),
-        json!({ "id": 10, "name": "Customer 10" }),
+        (String::from("1"), json!({ "id": 1, "name": "Customer 1" })),
+        (String::from("2"), json!({ "id": 2, "name": "Customer 2" })),
+        (String::from("3"), json!({ "id": 3, "name": "Customer 3" })),
+        (String::from("4"), json!({ "id": 4, "name": "Customer 4" })),
+        (String::from("5"), json!({ "id": 5, "name": "Customer 5" })),
+        (String::from("6"), json!({ "id": 6, "name": "Customer 6" })),
+        (String::from("7"), json!({ "id": 7, "name": "Customer 7" })),
+        (String::from("8"), json!({ "id": 8, "name": "Customer 8" })),
+        (String::from("9"), json!({ "id": 9, "name": "Customer 9" })),
+        (
+            String::from("10"),
+            json!({ "id": 10, "name": "Customer 10" }),
+        ),
     ];
 
     // Create references to the messages for the stream
-    let message_refs: Vec<&Value> = messages.iter().collect();
+    // Create references to the messages for the stream
+    let message_refs: Vec<(&String, &Value)> = messages.iter().map(|(k, v)| (k, v)).collect();
 
     // Create a stream from the message references
     let stream = stream::iter(message_refs);
