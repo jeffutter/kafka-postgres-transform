@@ -16,8 +16,6 @@ use twox_hash::XxHash64;
 pub struct DenoPlugin {
     runtimes: Vec<Option<JsRuntime>>,
     num_cores: usize,
-    // Track the order of runtime creation for proper cleanup
-    runtime_creation_order: Vec<usize>,
 }
 
 extension!(
@@ -75,13 +73,9 @@ pub fn init_plugin(plugin_path: &Path) -> Result<DenoPlugin> {
         runtimes.push(Some(runtime));
     }
 
-    // Track the order of runtime creation for proper cleanup
-    let runtime_creation_order = (0..num_cores).collect();
-
     Ok(DenoPlugin {
         runtimes,
         num_cores,
-        runtime_creation_order,
     })
 }
 
@@ -207,14 +201,11 @@ fn get_runtime_index(key: &str, num_cores: usize) -> usize {
 
 impl Drop for DenoPlugin {
     fn drop(&mut self) {
-        // Drop runtimes in reverse order of creation
-        for &idx in self.runtime_creation_order.iter().rev() {
-            if idx < self.runtimes.len() {
-                // Take ownership of the runtime
-                if let Some(runtime) = self.runtimes[idx].take() {
-                    // Drop it explicitly
-                    drop(runtime);
-                }
+        for idx in (0..self.runtimes.len()).rev() {
+            // Take ownership of the runtime
+            if let Some(runtime) = self.runtimes[idx].take() {
+                // Drop it explicitly
+                drop(runtime);
             }
         }
     }
