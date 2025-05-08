@@ -1,11 +1,17 @@
+use std::collections::{HashMap, hash_map::Entry};
+
 use anyhow::{Context, Result, bail};
-use deadpool::managed::Pool;
 use deadpool_postgres::Manager;
 use serde_json::Value;
-use tokio_postgres::{Client, NoTls, types::ToSql};
+use tokio_postgres::{Client, NoTls, Statement, types::ToSql};
 use tracing::info;
 
 use crate::deno::TransformResult;
+
+struct Pool {
+    db: deadpool::managed::Pool<Manager>,
+    query_cache: HashMap<(String, String, String, String), Statement>,
+}
 
 pub async fn init_client(postgres_url: &str) -> Result<Client> {
     info!("Connecting to PostgreSQL at: {}", postgres_url);
@@ -50,7 +56,7 @@ impl ColumnData {
     }
 }
 
-pub async fn insert_data(pool: &Pool<Manager>, data: &TransformResult) -> Result<u64> {
+pub async fn insert_data(pool: &Pool, data: &TransformResult) -> Result<u64> {
     if !data.success {
         bail!("TransformResult indicates failure: {:?}", data.error);
     }
@@ -164,19 +170,33 @@ pub async fn insert_data(pool: &Pool<Manager>, data: &TransformResult) -> Result
         .collect::<Vec<_>>()
         .join(", ");
 
-    let query = format!(
-        "INSERT INTO {}.{} ({}) SELECT * FROM UNNEST({})",
-        table_info.schema, table_info.name, column_names, unnest_args
-    );
-
-    let params: Vec<&(dyn ToSql + Sync)> = column_data.iter().map(|c| c.as_sql_param()).collect();
-
-    let connection = pool.get().await;
+    let connection = pool.db.get().await;
     if connection.is_err() {
         println!("Connection: {connection:?}");
     }
     let connection = connection?;
-    let inserted = connection.execute(query.as_str(), &params).await;
+
+    let statement = match pool.query_cache.entry((
+        table_info.schema,
+        table_info.name,
+        column_names,
+        unnest_args,
+    )) {
+        Entry::Occupied(occupied_entry) => occupied_entry.get(),
+        Entry::Vacant(vacant_entry) => {
+            let query = format!(
+                "INSERT INTO {}.{} ({}) SELECT * FROM UNNEST({})",
+                table_info.schema, table_info.name, column_names, unnest_args
+            );
+            let statement = connection.prepare(query.as_str()).await?;
+            vacant_entry.insert_entry(statement);
+            &statement
+        }
+    };
+
+    let params: Vec<&(dyn ToSql + Sync)> = column_data.iter().map(|c| c.as_sql_param()).collect();
+
+    let inserted = connection.execute(statement, &params).await;
     if inserted.is_err() {
         println!("InsertedRes: {inserted:?}");
     }

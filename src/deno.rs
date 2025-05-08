@@ -157,12 +157,10 @@ impl DenoPool {
         let mut workers = Vec::with_capacity(worker_count);
 
         let plugin_path = plugin_path.to_path_buf();
-        for i in 0..worker_count {
+        for _ in 0..worker_count {
             // Create a new worker with a cloned path
-            println!("Starting Worker {i}");
             let worker = Worker::new(plugin_path.clone())?;
             workers.push(Arc::new(Mutex::new(worker)));
-            println!("Started Worker {i}");
         }
 
         Ok(Self {
@@ -172,13 +170,10 @@ impl DenoPool {
     }
 
     pub async fn execute(&self, values: Vec<Value>) -> anyhow::Result<TransformResult> {
-        println!("Execute");
         // Try to find an available worker first
         for worker in &self.workers {
             // Try to lock the worker without blocking
-            println!("Trying to get worker");
             if let Ok(worker) = worker.try_lock() {
-                println!("Got Worker");
                 let receiver = worker.execute(values)?;
                 return receiver.await.context("Worker thread panicked")?;
             }

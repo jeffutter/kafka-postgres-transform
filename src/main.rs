@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, level_filters::LevelFilter};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 // Use the modules from lib.rs instead of defining them here
 use kafka_postgres_transform::{config::AppConfig, deno, file, kafka, postgres};
@@ -58,10 +59,21 @@ enum Command {
     },
 }
 
+/// Setup tracing and logging
+fn setup_tracing() {
+    let default_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(default_filter))
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    tracing_subscriber::fmt::init();
+    setup_tracing();
 
     // Parse command line arguments
     let args = Args::parse();
