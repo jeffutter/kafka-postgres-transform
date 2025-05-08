@@ -33,19 +33,23 @@ pub async fn process_file(
         .map(|_| tokio::sync::mpsc::channel::<DynamicMessage>(1000))
         .unzip();
 
-    let js_pool: deadpool::unmanaged::Pool<deno::DenoRuntime> = deadpool::unmanaged::Pool::from(
-        (0..num_partitions)
-            .map(|_| deno::DenoRuntime::new(plugin).unwrap())
-            .collect::<Vec<_>>(),
-    );
+    // let js_pool: deadpool::unmanaged::Pool<deno::DenoRuntime> = deadpool::unmanaged::Pool::from(
+    //     (0..num_partitions)
+    //         .map(|_| deno::DenoRuntime::new(plugin).unwrap())
+    //         .collect::<Vec<_>>(),
+    // );
+    let js_pool = deno::DenoPool::new(plugin)?;
 
     let file_path = file_path.to_owned();
     let type_name = type_name.to_owned();
     tokio::spawn(async move {
         // Read and decompress the file
+        println!("A1");
         let (num_messages, _pool, messages) = read_pool_and_messages(&file_path, &type_name)?;
+        println!("A2");
 
         pin!(messages);
+        println!("A3");
         info!("Found {num_messages} messages in file");
         let mut success_count = 0;
         let mut hasher = XxHash64::default();
@@ -69,6 +73,7 @@ pub async fn process_file(
     let rx_streams = rxs.into_iter().map(ReceiverStream::new).map(|s| {
         let x = aimd_stream::adaptive_batch(s, 100, 1, 1000, Duration::from_millis(100))
             .map(|ms| {
+                println!("D");
                 ms.into_iter()
                     .map(|m| {
                         let json = crate::protobuf::dynamic_message_to_json(&m)?;
@@ -77,7 +82,10 @@ pub async fn process_file(
                     .collect::<Result<Vec<_>>>()
             })
             .and_then(|values| async {
-                let res = js_pool.get().await?.execute(values)?;
+                // let res = js_pool.get().await?.execute(values)?;
+                println!("B");
+                let res = js_pool.execute(values).await?;
+                println!("C");
                 anyhow::Ok(res)
             });
 
@@ -86,10 +94,14 @@ pub async fn process_file(
 
     let stream = futures::stream::select_all(rx_streams);
 
+    println!("A");
+
     let inserted = stream
         .and_then(|batch| async move { insert_data(pg_pool, &batch).await })
         .try_fold(0, |acc, inserted| async move { Ok(acc + inserted) })
         .await?;
+
+    println!("Z");
 
     Ok(inserted as usize)
 }
@@ -111,6 +123,8 @@ pub fn read_pool_and_messages(
     let decoder = zstd::Decoder::new(file).context("Failed to create zstd decoder")?;
     let mut reader = BufReader::new(decoder);
 
+    println!("B0");
+
     // Read pool length
     let mut len_buf = [0u8; 4];
     reader
@@ -118,23 +132,31 @@ pub fn read_pool_and_messages(
         .context("Failed to read pool length")?;
     let pool_len = u32::from_le_bytes(len_buf);
 
+    println!("B1");
+
     // Read pool bytes and decode
     let mut pool_bytes = vec![0u8; pool_len as usize];
     reader
         .read_exact(&mut pool_bytes)
         .context("Failed to read pool bytes")?;
+    println!("B2");
     let fds = FileDescriptorSet::decode(pool_bytes.as_slice())
         .context("Failed to decode FileDescriptorSet")?;
+    println!("B3");
     let pool =
         DescriptorPool::from_file_descriptor_set(fds).context("Failed to create DescriptorPool")?;
+
+    println!("B4");
 
     // Get message descriptor
     let msg_desc = pool
         .get_message_by_name(type_name)
         .ok_or_else(|| anyhow::anyhow!("Message type {} not found", type_name))?;
 
+    println!("B5");
     // Read all messages
     let messages = read_messages(reader, msg_desc);
+    println!("B6");
 
     Ok((num_messages, pool, messages))
 }
