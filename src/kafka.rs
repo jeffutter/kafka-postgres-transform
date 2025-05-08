@@ -1,9 +1,7 @@
 use crate::config::AppConfig;
 use crate::deno::DenoRuntime;
-use crate::protobuf;
+use crate::{postgres, protobuf};
 use anyhow::{Context, Result};
-use deadpool::managed::Pool;
-use deadpool_postgres::Manager;
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{
@@ -110,7 +108,7 @@ async fn process_message(
     payload: &[u8],
     sr_settings: &SrSettings,
     plugin: &mut DenoRuntime,
-    pg_pool: &Pool<Manager>,
+    pg_pool: &postgres::Pool,
     topic: &str,
 ) -> Result<()> {
     // Get schema from Schema Registry

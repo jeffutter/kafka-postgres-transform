@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
-use deadpool_postgres::Manager;
 use futures::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use prost_reflect::prost_types::FileDescriptorSet;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
+use rustc_hash::FxHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read};
@@ -12,9 +12,8 @@ use std::time::Duration;
 use tokio::pin;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::info;
-use twox_hash::XxHash64;
 
-use crate::postgres::insert_data;
+use crate::postgres::{self, insert_data};
 use crate::{aimd_stream, deno};
 
 type MessageStreamResult = Result<(String, DynamicMessage)>;
@@ -24,7 +23,7 @@ pub async fn process_file(
     file_path: &Path,
     type_name: &str,
     plugin: &Path,
-    pg_pool: &deadpool::managed::Pool<Manager>,
+    pg_pool: &postgres::Pool,
 ) -> Result<usize> {
     info!("Processing protobuf messages from file: {:?}", file_path);
 
@@ -33,11 +32,6 @@ pub async fn process_file(
         .map(|_| tokio::sync::mpsc::channel::<DynamicMessage>(1000))
         .unzip();
 
-    // let js_pool: deadpool::unmanaged::Pool<deno::DenoRuntime> = deadpool::unmanaged::Pool::from(
-    //     (0..num_partitions)
-    //         .map(|_| deno::DenoRuntime::new(plugin).unwrap())
-    //         .collect::<Vec<_>>(),
-    // );
     let js_pool = deno::DenoPool::new(plugin)?;
 
     let file_path = file_path.to_owned();
@@ -49,7 +43,7 @@ pub async fn process_file(
         pin!(messages);
         info!("Found {num_messages} messages in file");
         let mut success_count = 0;
-        let mut hasher = XxHash64::default();
+        let mut hasher = FxHasher::default();
 
         while let Some((_i, Ok((key, message)))) = messages.as_mut().enumerate().next().await {
             key.hash(&mut hasher);

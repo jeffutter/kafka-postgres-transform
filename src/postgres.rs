@@ -1,16 +1,35 @@
-use std::collections::{HashMap, hash_map::Entry};
-
 use anyhow::{Context, Result, bail};
+use dashmap::{DashMap, Entry};
 use deadpool_postgres::Manager;
 use serde_json::Value;
 use tokio_postgres::{Client, NoTls, Statement, types::ToSql};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::deno::TransformResult;
 
-struct Pool {
+pub struct Pool {
     db: deadpool::managed::Pool<Manager>,
-    query_cache: HashMap<(String, String, String, String), Statement>,
+    query_cache: DashMap<(String, String, String, String), Statement>,
+}
+
+impl Pool {
+    pub fn new(url: &str) -> anyhow::Result<Self> {
+        let pg_config: tokio_postgres::Config = url.parse()?;
+        let mgr_config = deadpool_postgres::ManagerConfig {
+            recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+        };
+        let mgr =
+            deadpool_postgres::Manager::from_config(pg_config, tokio_postgres::NoTls, mgr_config);
+        let pg_pool = deadpool_postgres::Pool::builder(mgr)
+            .max_size(16)
+            .build()
+            .unwrap();
+
+        Ok(Self {
+            db: pg_pool,
+            query_cache: DashMap::new(),
+        })
+    }
 }
 
 pub async fn init_client(postgres_url: &str) -> Result<Client> {
@@ -72,10 +91,18 @@ pub async fn insert_data(pool: &Pool, data: &TransformResult) -> Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("Missing data"))?;
 
     if rows.is_empty() {
-        return Ok(0); // nothing to insert
+        return Ok(0);
     }
 
     let columns = &table_info.columns;
+
+    if columns.is_empty() {
+        warn!(
+            "TransformResult contained no columns, skipping {} rows",
+            rows.len()
+        );
+        return Ok(0);
+    }
 
     // Create a vector of ColumnData based on type
     let mut column_data: Vec<ColumnData> = vec![];
@@ -177,26 +204,26 @@ pub async fn insert_data(pool: &Pool, data: &TransformResult) -> Result<u64> {
     let connection = connection?;
 
     let statement = match pool.query_cache.entry((
-        table_info.schema,
-        table_info.name,
-        column_names,
-        unnest_args,
+        table_info.schema.clone(),
+        table_info.name.clone(),
+        column_names.clone(),
+        unnest_args.clone(),
     )) {
-        Entry::Occupied(occupied_entry) => occupied_entry.get(),
+        Entry::Occupied(occupied_entry) => occupied_entry.get().clone(),
         Entry::Vacant(vacant_entry) => {
             let query = format!(
                 "INSERT INTO {}.{} ({}) SELECT * FROM UNNEST({})",
                 table_info.schema, table_info.name, column_names, unnest_args
             );
             let statement = connection.prepare(query.as_str()).await?;
-            vacant_entry.insert_entry(statement);
-            &statement
+            vacant_entry.insert_entry(statement.clone());
+            statement
         }
     };
 
     let params: Vec<&(dyn ToSql + Sync)> = column_data.iter().map(|c| c.as_sql_param()).collect();
 
-    let inserted = connection.execute(statement, &params).await;
+    let inserted = connection.execute(&statement, &params).await;
     if inserted.is_err() {
         println!("InsertedRes: {inserted:?}");
     }

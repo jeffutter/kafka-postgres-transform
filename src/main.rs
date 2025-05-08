@@ -78,16 +78,7 @@ async fn main() -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
 
-    // Initialize PostgreSQL connection
-    let pg_config: tokio_postgres::Config = args.postgres_url.parse()?;
-    let mgr_config = deadpool_postgres::ManagerConfig {
-        recycling_method: deadpool_postgres::RecyclingMethod::Fast,
-    };
-    let mgr = deadpool_postgres::Manager::from_config(pg_config, tokio_postgres::NoTls, mgr_config);
-    let pg_pool = deadpool_postgres::Pool::builder(mgr)
-        .max_size(16)
-        .build()
-        .unwrap();
+    let pg_pool = postgres::Pool::new(&args.postgres_url)?;
 
     match &args.command {
         Command::Kafka {

@@ -156,6 +156,10 @@ impl DenoPool {
         let worker_count = num_cpus::get();
         let mut workers = Vec::with_capacity(worker_count);
 
+        // On some platforms, deno will SIGSEGV when the runtimes try to start in parallel without
+        // first running init_platform
+        deno_core::JsRuntime::init_platform(None, false);
+
         let plugin_path = plugin_path.to_path_buf();
         for _ in 0..worker_count {
             // Create a new worker with a cloned path
