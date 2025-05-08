@@ -1,17 +1,21 @@
 use anyhow::{Context, Result};
-use futures::{Stream, StreamExt};
+use deadpool_postgres::Manager;
+use futures::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use prost_reflect::prost_types::FileDescriptorSet;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
+use std::time::Duration;
 use tokio::pin;
-use tokio_postgres::Client;
-use tracing::{info, warn};
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::info;
+use twox_hash::XxHash64;
 
-use crate::deno::DenoPlugin;
 use crate::postgres::insert_data;
+use crate::{aimd_stream, deno};
 
 type MessageStreamResult = Result<(String, DynamicMessage)>;
 
@@ -19,38 +23,75 @@ type MessageStreamResult = Result<(String, DynamicMessage)>;
 pub async fn process_file(
     file_path: &Path,
     type_name: &str,
-    plugin: &mut DenoPlugin,
-    pg_client: &mut Client,
+    plugin: &Path,
+    pg_pool: &deadpool::managed::Pool<Manager>,
 ) -> Result<usize> {
     info!("Processing protobuf messages from file: {:?}", file_path);
 
-    // Read and decompress the file
-    let (num_messages, _pool, messages) = read_pool_and_messages(file_path, type_name)?;
+    let num_partitions = num_cpus::get(); // e.g. 8
+    let (txs, rxs): (Vec<_>, Vec<_>) = (0..num_partitions)
+        .map(|_| tokio::sync::mpsc::channel::<DynamicMessage>(1000))
+        .unzip();
 
-    info!("Found {num_messages} messages in file");
-
-    let mut success_count = 0;
-
-    pin!(messages);
-
-    // Process each message
-    while let Some((i, Ok((key, message)))) = messages.as_mut().enumerate().next().await {
-        match process_message(key, &message, plugin, pg_client).await {
-            Ok(_) => {
-                success_count += 1;
-            }
-            Err(e) => {
-                warn!("Failed to process message {}: {}", i, e);
-            }
-        }
-    }
-
-    info!(
-        "Successfully processed {}/{} messages",
-        success_count, num_messages
+    let js_pool: deadpool::unmanaged::Pool<deno::DenoRuntime> = deadpool::unmanaged::Pool::from(
+        (0..num_partitions)
+            .map(|_| deno::DenoRuntime::new(plugin).unwrap())
+            .collect::<Vec<_>>(),
     );
 
-    Ok(success_count)
+    let file_path = file_path.to_owned();
+    let type_name = type_name.to_owned();
+    tokio::spawn(async move {
+        // Read and decompress the file
+        let (num_messages, _pool, messages) = read_pool_and_messages(&file_path, &type_name)?;
+
+        pin!(messages);
+        info!("Found {num_messages} messages in file");
+        let mut success_count = 0;
+        let mut hasher = XxHash64::default();
+
+        while let Some((_i, Ok((key, message)))) = messages.as_mut().enumerate().next().await {
+            key.hash(&mut hasher);
+            let partition = (hasher.finish() % num_partitions as u64) as usize;
+
+            txs[partition].send(message).await?;
+            success_count += 1;
+        }
+
+        info!(
+            "Successfully processed {}/{} messages",
+            success_count, num_messages
+        );
+
+        anyhow::Ok(())
+    });
+
+    let rx_streams = rxs.into_iter().map(ReceiverStream::new).map(|s| {
+        let x = aimd_stream::adaptive_batch(s, 100, 1, 1000, Duration::from_millis(100))
+            .map(|ms| {
+                ms.into_iter()
+                    .map(|m| {
+                        let json = crate::protobuf::dynamic_message_to_json(&m)?;
+                        anyhow::Ok(json)
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .and_then(|values| async {
+                let res = js_pool.get().await?.execute(values)?;
+                anyhow::Ok(res)
+            });
+
+        Box::pin(x)
+    });
+
+    let stream = futures::stream::select_all(rx_streams);
+
+    let inserted = stream
+        .and_then(|batch| async move { insert_data(pg_pool, &batch).await })
+        .try_fold(0, |acc, inserted| async move { Ok(acc + inserted) })
+        .await?;
+
+    Ok(inserted as usize)
 }
 
 /// Reads the descriptor pool and messages from a zstandard compressed file
@@ -114,7 +155,7 @@ fn read_messages<R: BufRead>(
         loop {
             let mut key_len_buf = [0u8; 4];
             match reader.read_exact(&mut key_len_buf) {
-            Ok(_) => {
+                Ok(_) => {
                     let key_len = u32::from_le_bytes(key_len_buf);
                     // Read pool bytes and decode
                     let mut key_bytes = vec![0u8; key_len as usize];
@@ -159,28 +200,9 @@ fn read_messages<R: BufRead>(
                 Err(e) => {
                     Err::<DynamicMessage, anyhow::Error>(e.into())?;
                 }
-        }
+            }
         }
     };
 
     stream
-}
-
-/// Processes a single message by transforming it and inserting into PostgreSQL
-async fn process_message(
-    key: String,
-    message: &DynamicMessage,
-    plugin: &mut DenoPlugin,
-    pg_client: &mut Client,
-) -> Result<()> {
-    // Convert message to JSON
-    let json_value = crate::protobuf::dynamic_message_to_json(message)?;
-
-    // Transform the message using the JavaScript plugin
-    let transformed = crate::deno::transform_message(plugin, &key, &json_value)?;
-
-    // Insert the transformed data into PostgreSQL
-    insert_data(pg_client, &transformed).await?;
-
-    Ok(())
 }

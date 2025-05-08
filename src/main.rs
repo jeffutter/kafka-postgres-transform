@@ -66,14 +66,16 @@ async fn main() -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
 
-    // Initialize JavaScript plugin
-    let mut plugin =
-        deno::init_plugin(&args.plugin).context("Failed to initialize JavaScript plugin")?;
-
     // Initialize PostgreSQL connection
-    let mut pg_client = postgres::init_client(&args.postgres_url)
-        .await
-        .context("Failed to connect to PostgreSQL")?;
+    let pg_config: tokio_postgres::Config = args.postgres_url.parse()?;
+    let mgr_config = deadpool_postgres::ManagerConfig {
+        recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+    };
+    let mgr = deadpool_postgres::Manager::from_config(pg_config, tokio_postgres::NoTls, mgr_config);
+    let pg_pool = deadpool_postgres::Pool::builder(mgr)
+        .max_size(16)
+        .build()
+        .unwrap();
 
     match &args.command {
         Command::Kafka {
@@ -87,13 +89,14 @@ async fn main() -> Result<()> {
                 bootstrap_servers: bootstrap_servers.clone(),
                 topic: topic.clone(),
                 schema_registry_url: schema_registry.clone(),
-                postgres_url: args.postgres_url.clone(),
+                pg_pool,
                 group_id: group_id.clone(),
             };
 
             // Start Kafka consumer
             info!("Starting Kafka consumer for topic: {}", config.topic);
-            kafka::consume_messages(config, plugin, pg_client)
+            let plugin = deno::DenoRuntime::new(&args.plugin)?;
+            kafka::consume_messages(config, plugin)
                 .await
                 .context("Error in Kafka message consumption")?;
         }
@@ -101,9 +104,14 @@ async fn main() -> Result<()> {
         Command::File { input, type_name } => {
             // Process messages from file
             info!("Processing messages from file: {:?}", input);
-            let count = file::process_file(input, type_name, &mut plugin, &mut pg_client)
+            let count = file::process_file(input, type_name, &args.plugin, &pg_pool)
                 .await
-                .context("Error processing file")?;
+                .context("Error processing file");
+
+            if count.is_err() {
+                println!("Command Failed: {:?}", count);
+            }
+            let count = count?;
 
             info!("Successfully processed {} messages from file", count);
         }

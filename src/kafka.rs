@@ -1,7 +1,9 @@
 use crate::config::AppConfig;
-use crate::deno::DenoPlugin;
+use crate::deno::DenoRuntime;
 use crate::protobuf;
 use anyhow::{Context, Result};
+use deadpool::managed::Pool;
+use deadpool_postgres::Manager;
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{
@@ -11,7 +13,6 @@ use rdkafka::error::KafkaResult;
 use rdkafka::message::Message;
 use schema_registry_converter::async_impl::schema_registry::SrSettings;
 use schema_registry_converter::schema_registry_common::SubjectNameStrategy;
-use tokio_postgres::Client;
 use tracing::{error, info, warn};
 
 struct CustomContext;
@@ -37,11 +38,7 @@ impl ConsumerContext for CustomContext {
 
 type LoggingConsumer = StreamConsumer<CustomContext>;
 
-pub async fn consume_messages(
-    config: AppConfig,
-    mut plugin: DenoPlugin,
-    mut pg_client: Client,
-) -> Result<()> {
+pub async fn consume_messages(config: AppConfig, mut plugin: DenoRuntime) -> Result<()> {
     // Create Schema Registry client
     let sr_settings = SrSettings::new(config.schema_registry_url.clone());
 
@@ -82,7 +79,7 @@ pub async fn consume_messages(
                     payload,
                     &sr_settings,
                     &mut plugin,
-                    &mut pg_client,
+                    &config.pg_pool,
                     &config.topic,
                 )
                 .await
@@ -112,8 +109,8 @@ async fn process_message(
     key: String,
     payload: &[u8],
     sr_settings: &SrSettings,
-    plugin: &mut DenoPlugin,
-    pg_client: &mut Client,
+    plugin: &mut DenoRuntime,
+    pg_pool: &Pool<Manager>,
     topic: &str,
 ) -> Result<()> {
     // Get schema from Schema Registry
@@ -124,14 +121,14 @@ async fn process_message(
         .await
         .context("Failed to decode Protobuf message")?;
 
-    // Transform the message using the JavaScript plugin
-    let transformed = crate::deno::transform_message(plugin, &key, &decoded)
-        .context("Failed to transform message with JavaScript plugin")?;
-
-    // Insert into PostgreSQL
-    crate::postgres::insert_data(pg_client, &transformed)
-        .await
-        .context("Failed to insert data into PostgreSQL")?;
+    // // Transform the message using the JavaScript plugin
+    // let transformed = crate::deno::transform_message(plugin, &key, &decoded)
+    //     .context("Failed to transform message with JavaScript plugin")?;
+    //
+    // // Insert into PostgreSQL
+    // crate::postgres::insert_data(pg_client, &transformed)
+    //     .await
+    //     .context("Failed to insert data into PostgreSQL")?;
 
     Ok(())
 }

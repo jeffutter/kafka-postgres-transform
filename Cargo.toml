@@ -29,3 +29,6 @@ serial_test = "3.2.0"
 num_cpus = "1.16.0"
 twox-hash = "1.6.3"
 core_affinity = "0.8.1"
+tokio-stream = "0.1.17"
+deadpool = { version = "0.12.2", features = ["unmanaged"] }
+deadpool-postgres = { version = "0.14.1", features = ["rt_tokio_1"] }
