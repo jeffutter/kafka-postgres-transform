@@ -508,7 +508,7 @@ version = "0.204.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf612efe642f90f0b0cbdf42d30f1da4ea1e73ade09404bc7795ca09b737304"
 dependencies = [
- "deno_core",
+ "deno_core 0.344.0",
 ]
 
 [[package]]
@@ -527,7 +527,7 @@ dependencies = [
  "cooked-waker",
  "deno_core_icudata",
  "deno_error",
- "deno_ops",
+ "deno_ops 0.220.0",
  "deno_path_util",
  "deno_unsync",
  "futures",
@@ -538,14 +538,52 @@ dependencies = [
  "pin-project",
  "serde",
  "serde_json",
- "serde_v8",
+ "serde_v8 0.253.0",
  "smallvec",
  "sourcemap",
  "static_assertions",
  "thiserror",
  "tokio",
  "url",
- "v8",
+ "v8 135.1.0",
+ "wasm_dep_analyzer",
+]
+
+[[package]]
+name = "deno_core"
+version = "0.346.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7aa52a258b569fd6ab2756d2435a56c82a4dc6cb749d8cf7957ffacdf293334d"
+dependencies = [
+ "anyhow",
+ "az",
+ "bincode",
+ "bit-set",
+ "bit-vec",
+ "bytes",
+ "capacity_builder",
+ "cooked-waker",
+ "deno_core_icudata",
+ "deno_error",
+ "deno_ops 0.222.0",
+ "deno_path_util",
+ "deno_unsync",
+ "futures",
+ "indexmap",
+ "libc",
+ "parking_lot",
+ "percent-encoding",
+ "pin-project",
+ "serde",
+ "serde_json",
+ "serde_v8 0.255.0",
+ "smallvec",
+ "sourcemap",
+ "static_assertions",
+ "thiserror",
+ "tokio",
+ "url",
+ "v8 137.1.0",
  "wasm_dep_analyzer",
 ]
 
@@ -585,6 +623,23 @@ name = "deno_ops"
 version = "0.220.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53ce6f862b06f81e42984d5517a355b961937446ffbc630043f8801cda2e4ad0"
+dependencies = [
+ "indexmap",
+ "proc-macro-rules",
+ "proc-macro2",
+ "quote",
+ "stringcase",
+ "strum",
+ "strum_macros",
+ "syn",
+ "thiserror",
+]
+
+[[package]]
+name = "deno_ops"
+version = "0.222.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50943fa006027bffd0c390d733bbaa8144cf7f5b35beb2e29e4a481ad8e3ae45"
 dependencies = [
  "indexmap",
  "proc-macro-rules",
@@ -1235,7 +1290,7 @@ dependencies = [
  "deadpool",
  "deadpool-postgres",
  "deno_console",
- "deno_core",
+ "deno_core 0.346.0",
  "futures",
  "num_cpus",
  "pin-project",
@@ -2225,7 +2280,21 @@ dependencies = [
  "serde",
  "smallvec",
  "thiserror",
- "v8",
+ "v8 135.1.0",
+]
+
+[[package]]
+name = "serde_v8"
+version = "0.255.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cdcce5bd642c2ead6e6eb9727f34b15559a68308c190482ac6fc120b711b4ff"
+dependencies = [
+ "deno_error",
+ "num-bigint",
+ "serde",
+ "smallvec",
+ "thiserror",
+ "v8 137.1.0",
 ]
 
 [[package]]
@@ -2798,6 +2867,22 @@ dependencies = [
  "gzip-header",
  "home",
  "miniz_oxide 0.7.4",
+ "paste",
+ "which",
+]
+
+[[package]]
+name = "v8"
+version = "137.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be127b878f582d3b7602bd2e26a39f90a95b388deb940da7f6554617aedcdf40"
+dependencies = [
+ "bindgen",
+ "bitflags",
+ "fslock",
+ "gzip-header",
+ "home",
+ "miniz_oxide 0.8.8",
  "paste",
  "which",
 ]
