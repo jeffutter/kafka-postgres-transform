@@ -7,7 +7,7 @@ edition = "2024"
 rdkafka = { version = "0.37", features = ["ssl-vendored", "cmake-build"] }
 schema_registry_converter = { version = "4.0.0", features = ["proto_raw"] }
 prost = "0.13"
-prost-reflect = "0.15"
+prost-reflect = "0.16"
 prost-types = "0.13"
 deno_core = "0.344.0"
 tokio = { version = "1", features = ["full"] }
